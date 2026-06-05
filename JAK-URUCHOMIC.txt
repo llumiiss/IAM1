@@ -1,0 +1,11 @@
+﻿PAC-MAN 3D - JAK URUCHOMIC
+==========================
+
+NAJLATWIEJ: kliknij dwukrotnie URUCHOM.bat
+
+Recznie (Python):
+  cd sciezka/do/folderu/pacman-3d
+  python -m http.server 8765
+  http://localhost:8765/index.html
+
+Wiecej informacji: README.md

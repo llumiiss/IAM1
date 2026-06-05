@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pac-Man 3D — Labirynt</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: "Segoe UI", Arial, sans-serif; }
+    #game { display: block; width: 100%; height: 100%; }
+
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0;
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 14px 22px; color: #ffe14d; font-weight: 700;
+      text-shadow: 0 0 8px rgba(255,225,77,.6); pointer-events: none;
+      font-size: 18px; letter-spacing: 1px;
+    }
+    #hud .right { display: flex; gap: 26px; }
+    #ammo.ready { color: #6cf; text-shadow: 0 0 8px rgba(102,204,255,.7); }
+    #ammo.empty { color: #888; text-shadow: none; }
+
+    #overlay {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      justify-content: center; align-items: center; text-align: center;
+      background: radial-gradient(circle at center, rgba(10,10,40,.85), rgba(0,0,0,.95));
+      color: #fff; z-index: 10; padding: 20px;
+    }
+    #overlay h1 { font-size: 54px; color: #ffe14d; text-shadow: 0 0 20px rgba(255,225,77,.7); margin-bottom: 10px; }
+    #overlay h2 { font-size: 30px; margin-bottom: 16px; }
+    #overlay p { max-width: 540px; line-height: 1.7; color: #cfd3ff; margin-bottom: 8px; }
+    #overlay .keys { margin: 18px 0; color: #9fe; font-size: 16px; }
+    #overlay button {
+      margin-top: 22px; padding: 14px 40px; font-size: 20px; font-weight: 700;
+      background: #ffe14d; color: #1a1a40; border: none; border-radius: 30px;
+      cursor: pointer; box-shadow: 0 0 20px rgba(255,225,77,.6); transition: transform .1s;
+    }
+    #overlay button:hover { transform: scale(1.06); }
+    .hidden { display: none !important; }
+    kbd {
+      background: #222; border: 1px solid #555; border-radius: 5px;
+      padding: 2px 9px; margin: 0 2px; font-size: 14px; color: #ffe14d;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <div id="hud" class="hidden">
+    <div class="left">WYNIK: <span id="score">0</span></div>
+    <div class="right">
+      <div>ŻYCIA: <span id="lives">3</span></div>
+      <div>KROPKI: <span id="dots">0</span></div>
+      <div id="ammo" class="ready">KULA: GOTOWA</div>
+    </div>
+  </div>
+
+  <div id="overlay">
+    <h1>PAC-MAN 3D</h1>
+    <h2 id="ov-title">Labirynt &amp; Duszki</h2>
+    <p id="ov-text">Zbieraj wszystkie kropki w labiryncie i unikaj duszków.</p>
+    <div class="keys">
+      Ruch: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> lub strzałki &nbsp;|&nbsp;
+      Strzał kulą: <kbd>Spacja</kbd>
+    </div>
+    <p style="color:#9aa;font-size:14px">Strzelasz jedną kulą naraz — trafiony duszek znika na chwilę i dostajesz punkty.</p>
+    <button id="startBtn">START</button>
+  </div>
+
+  <!-- Three.js lokalnie — działa bez serwera i bez internetu -->
+  <script src="three.min.js"></script>
+  <script>
+    if (typeof THREE === 'undefined') {
+      document.body.innerHTML = '<p style="color:#fff;padding:40px;font-family:sans-serif">Błąd: brak pliku three.min.js w tym samym folderze co index.html</p>';
+      throw new Error('THREE not loaded');
+    }
+
+    // ----------------------------------------------------------
+    //  USTAWIENIA / STAŁE
+    // ----------------------------------------------------------
+    const CELL = 2.4;            // rozmiar komórki labiryntu (jednostki świata)
+    const WALL_H = 2.2;          // wysokość ścian
+    const PLAYER_R = 0.55;       // promień gracza
+    const PLAYER_SPEED = 6.0;    // prędkość gracza (jedn./s)
+    const GHOST_SPEED = 3.4;     // prędkość duszków
+    const BULLET_SPEED = 18.0;   // prędkość kuli
+    const START_LIVES = 3;
+
+    // Mapa labiryntu:  # = ściana, . = kropka (ścieżka), ' ' = puste pole,
+    // P = start gracza,  G = start duszka
+    const MAZE = [
+      "###################",
+      "#........#........#",
+      "#.##.###.#.###.##.#",
+      "#.................#",
+      "#.##.#.#####.#.##.#",
+      "#....#...#...#....#",
+      "####.### # ###.####",
+      "   #.#  G G  #.#   ",
+      "####.# ##### #.####",
+      "#......#GGG#......#",
+      "####.# ##### #.####",
+      "   #.#       #.#   ",
+      "####.# ##### #.####",
+      "#........#........#",
+      "#.##.###.#.###.##.#",
+      "#..#.....P.....#..#",
+      "##.#.#.#####.#.#.##",
+      "#....#...#...#....#",
+      "###################",
+    ];
+
+    const ROWS = MAZE.length;
+    const COLS = MAZE[0].length;
+
+    // Zamiana wiersz/kolumna -> pozycja w świecie (środek komórki)
+    function cellToWorld(r, c) {
+      return new THREE.Vector3(
+        (c - (COLS - 1) / 2) * CELL,
+        0,
+        (r - (ROWS - 1) / 2) * CELL
+      );
+    }
+    function worldToCell(x, z) {
+      return {
+        c: Math.round(x / CELL + (COLS - 1) / 2),
+        r: Math.round(z / CELL + (ROWS - 1) / 2),
+      };
+    }
+    function isWall(r, c) {
+      if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return true;
+      return MAZE[r][c] === '#';
+    }
+
+    // ----------------------------------------------------------
+    //  SCENA / RENDERER / KAMERA
+    // ----------------------------------------------------------
+    const canvas = document.getElementById('game');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x05060f);
+    scene.fog = new THREE.Fog(0x05060f, 22, 48);
+
+    const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 200);
+    const CAM_OFFSET = new THREE.Vector3(0, 16, 13); // ujęcie z góry-tyłu
+
+    // Światła
+    scene.add(new THREE.AmbientLight(0x6677aa, 0.7));
+    const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+    dir.position.set(10, 25, 10);
+    dir.castShadow = true;
+    dir.shadow.mapSize.set(2048, 2048);
+    dir.shadow.camera.left = -35; dir.shadow.camera.right = 35;
+    dir.shadow.camera.top = 35; dir.shadow.camera.bottom = -35;
+    scene.add(dir);
+    const playerLight = new THREE.PointLight(0xffe14d, 0.8, 12);
+    scene.add(playerLight);
+
+    // ----------------------------------------------------------
+    //  PODŁOGA
+    // ----------------------------------------------------------
+    const floorGeo = new THREE.PlaneGeometry(COLS * CELL + 6, ROWS * CELL + 6);
+    const floorMat = new THREE.MeshStandardMaterial({ color: 0x0a0a22, roughness: 0.9, metalness: 0.1 });
+    const floor = new THREE.Mesh(floorGeo, floorMat);
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = -0.01;
+    floor.receiveShadow = true;
+    scene.add(floor);
+
+    // ----------------------------------------------------------
+    //  ŚCIANY + KROPKI
+    // ----------------------------------------------------------
+    const wallGeo = new THREE.BoxGeometry(CELL, WALL_H, CELL);
+    const wallMat = new THREE.MeshStandardMaterial({
+      color: 0x2240dd, roughness: 0.35, metalness: 0.45,
+      emissive: 0x0a1a66, emissiveIntensity: 0.6,
+    });
+    const wallMesh = new THREE.InstancedMesh(wallGeo, wallMat, ROWS * COLS);
+    wallMesh.castShadow = true; wallMesh.receiveShadow = true;
+    let wIdx = 0;
+    const m4 = new THREE.Matrix4();
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (MAZE[r][c] === '#') {
+          const p = cellToWorld(r, c);
+          m4.makeTranslation(p.x, WALL_H / 2, p.z);
+          wallMesh.setMatrixAt(wIdx++, m4);
+        }
+      }
+    }
+    wallMesh.count = wIdx;
+    scene.add(wallMesh);
+
+    // Kropki
+    const dots = [];
+    const dotGeo = new THREE.SphereGeometry(0.16, 10, 10);
+    const dotMat = new THREE.MeshStandardMaterial({
+      color: 0xffe14d, emissive: 0xffaa00, emissiveIntensity: 0.9,
+    });
+    const dotGroup = new THREE.Group();
+    scene.add(dotGroup);
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (MAZE[r][c] === '.') {
+          const d = new THREE.Mesh(dotGeo, dotMat);
+          const p = cellToWorld(r, c);
+          d.position.set(p.x, 0.5, p.z);
+          dotGroup.add(d);
+          dots.push(d);
+        }
+      }
+    }
+    let totalDots = dots.length;
+
+    // ----------------------------------------------------------
+    //  GRACZ (Pac-Man)
+    // ----------------------------------------------------------
+    const playerGeo = new THREE.SphereGeometry(PLAYER_R, 24, 24);
+    const playerMat = new THREE.MeshStandardMaterial({
+      color: 0xffe14d, emissive: 0x886600, emissiveIntensity: 0.5,
+      roughness: 0.3, metalness: 0.2,
+    });
+    const player = new THREE.Mesh(playerGeo, playerMat);
+    player.castShadow = true;
+    scene.add(player);
+
+    let playerStart = cellToWorld(0, 0);
+    for (let r = 0; r < ROWS; r++)
+      for (let c = 0; c < COLS; c++)
+        if (MAZE[r][c] === 'P') playerStart = cellToWorld(r, c);
+
+    const playerPos = playerStart.clone();
+    const facing = new THREE.Vector3(0, 0, -1); // ostatni kierunek ruchu
+
+    // ----------------------------------------------------------
+    //  DUSZKI
+    // ----------------------------------------------------------
+    const GHOST_COLORS = [0xff4444, 0xff8cce, 0x46e0ff, 0xffa040];
+    const ghosts = [];
+    const ghostSpawns = [];
+    for (let r = 0; r < ROWS; r++)
+      for (let c = 0; c < COLS; c++)
+        if (MAZE[r][c] === 'G') ghostSpawns.push({ r, c });
+
+    function makeGhost(color, spawn) {
+      const g = new THREE.Group();
+      const bodyMat = new THREE.MeshStandardMaterial({
+        color, emissive: color, emissiveIntensity: 0.35, roughness: 0.4,
+      });
+      const body = new THREE.Mesh(new THREE.SphereGeometry(PLAYER_R, 20, 20, 0, Math.PI * 2, 0, Math.PI / 2 + 0.4), bodyMat);
+      body.castShadow = true;
+      const skirt = new THREE.Mesh(new THREE.CylinderGeometry(PLAYER_R, PLAYER_R, 0.55, 20), bodyMat);
+      skirt.position.y = -0.27; skirt.castShadow = true;
+      g.add(body); g.add(skirt);
+      // oczy
+      const eyeMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+      const pupMat = new THREE.MeshStandardMaterial({ color: 0x1133aa });
+      for (const sx of [-0.22, 0.22]) {
+        const eye = new THREE.Mesh(new THREE.SphereGeometry(0.16, 12, 12), eyeMat);
+        eye.position.set(sx, 0.12, -0.42);
+        const pup = new THREE.Mesh(new THREE.SphereGeometry(0.08, 10, 10), pupMat);
+        pup.position.set(sx, 0.12, -0.54);
+        g.add(eye); g.add(pup);
+      }
+      g.position.copy(cellToWorld(spawn.r, spawn.c)).setY(0.55);
+      scene.add(g);
+      return {
+        mesh: g, color, spawn,
+        cell: { r: spawn.r, c: spawn.c },
+        target: { r: spawn.r, c: spawn.c },
+        dirRC: { dr: 0, dc: 0 },
+        respawnTimer: 0,
+        dead: false,
+      };
+    }
+    for (let i = 0; i < ghostSpawns.length; i++) {
+      ghosts.push(makeGhost(GHOST_COLORS[i % GHOST_COLORS.length], ghostSpawns[i]));
+    }
+
+    // ----------------------------------------------------------
+    //  KULA (pocisk) — tylko jedna naraz
+    // ----------------------------------------------------------
+    let bullet = null;
+    const bulletGeo = new THREE.SphereGeometry(0.22, 16, 16);
+    const bulletMat = new THREE.MeshStandardMaterial({
+      color: 0x66ccff, emissive: 0x33aaff, emissiveIntensity: 1.4,
+    });
+
+    function shoot() {
+      if (bullet || !running) return;
+      const mesh = new THREE.Mesh(bulletGeo, bulletMat);
+      mesh.position.copy(playerPos).setY(0.55);
+      const light = new THREE.PointLight(0x66ccff, 1.2, 6);
+      mesh.add(light);
+      scene.add(mesh);
+      bullet = { mesh, vel: facing.clone().normalize().multiplyScalar(BULLET_SPEED), life: 2.2 };
+      updateAmmoHUD();
+    }
+    function removeBullet() {
+      if (!bullet) return;
+      scene.remove(bullet.mesh);
+      bullet = null;
+      updateAmmoHUD();
+    }
+
+    // ----------------------------------------------------------
+    //  STEROWANIE
+    // ----------------------------------------------------------
+    const keys = {};
+    window.addEventListener('keydown', (e) => {
+      keys[e.code] = true;
+      if (e.code === 'Space') { e.preventDefault(); shoot(); }
+      if ([ 'ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space' ].includes(e.code)) e.preventDefault();
+    });
+    window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+    // ----------------------------------------------------------
+    //  KOLIZJE GRACZ <-> ŚCIANY  (przesuwanie po osiach + ślizganie)
+    // ----------------------------------------------------------
+    function collidesAt(x, z) {
+      // sprawdza komórki w pobliżu pozycji (x,z)
+      const minC = Math.floor((x - PLAYER_R) / CELL + (COLS - 1) / 2);
+      const maxC = Math.ceil((x + PLAYER_R) / CELL + (COLS - 1) / 2);
+      const minR = Math.floor((z - PLAYER_R) / CELL + (ROWS - 1) / 2);
+      const maxR = Math.ceil((z + PLAYER_R) / CELL + (ROWS - 1) / 2);
+      for (let r = minR; r <= maxR; r++) {
+        for (let c = minC; c <= maxC; c++) {
+          if (!isWall(r, c)) continue;
+          const wc = cellToWorld(r, c);
+          const half = CELL / 2;
+          const nearestX = Math.max(wc.x - half, Math.min(x, wc.x + half));
+          const nearestZ = Math.max(wc.z - half, Math.min(z, wc.z + half));
+          const dx = x - nearestX, dz = z - nearestZ;
+          if (dx * dx + dz * dz < PLAYER_R * PLAYER_R) return true;
+        }
+      }
+      return false;
+    }
+
+    // ----------------------------------------------------------
+    //  RUCH DUSZKÓW  (po siatce, w stronę gracza)
+    // ----------------------------------------------------------
+    function ghostChooseTarget(g) {
+      const { r, c } = g.cell;
+      const options = [];
+      const dirs = [
+        { dr: -1, dc: 0 }, { dr: 1, dc: 0 },
+        { dr: 0, dc: -1 }, { dr: 0, dc: 1 },
+      ];
+      for (const d of dirs) {
+        const nr = r + d.dr, nc = c + d.dc;
+        if (isWall(nr, nc)) continue;
+        // nie zawracaj, chyba że ślepy zaułek
+        if (d.dr === -g.dirRC.dr && d.dc === -g.dirRC.dc) continue;
+        options.push({ d, nr, nc });
+      }
+      let pool = options;
+      if (pool.length === 0) {
+        // ślepy zaułek -> zawróć
+        const nr = r - g.dirRC.dr, nc = c - g.dirRC.dc;
+        if (!isWall(nr, nc)) pool = [{ d: { dr: -g.dirRC.dr, dc: -g.dirRC.dc }, nr, nc }];
+        else return;
+      }
+      // cel: komórka gracza
+      const pc = worldToCell(playerPos.x, playerPos.z);
+      // 70% goni gracza, 30% losowo (żeby się nie blokowały)
+      let chosen;
+      if (Math.random() < 0.7) {
+        chosen = pool.reduce((best, o) => {
+          const dist = (o.nr - pc.r) ** 2 + (o.nc - pc.c) ** 2;
+          return (!best || dist < best.dist) ? { ...o, dist } : best;
+        }, null);
+      } else {
+        chosen = pool[Math.floor(Math.random() * pool.length)];
+      }
+      g.dirRC = chosen.d;
+      g.target = { r: chosen.nr, c: chosen.nc };
+    }
+
+    function updateGhost(g, dt) {
+      if (g.dead) {
+        g.respawnTimer -= dt;
+        if (g.respawnTimer <= 0) {
+          g.dead = false;
+          g.mesh.visible = true;
+          g.cell = { r: g.spawn.r, c: g.spawn.c };
+          g.target = { r: g.spawn.r, c: g.spawn.c };
+          g.dirRC = { dr: 0, dc: 0 };
+          g.mesh.position.copy(cellToWorld(g.spawn.r, g.spawn.c)).setY(0.55);
+        }
+        return;
+      }
+      const tgtPos = cellToWorld(g.target.r, g.target.c).setY(0.55);
+      const toTgt = tgtPos.clone().sub(g.mesh.position);
+      const dist = toTgt.length();
+      const step = GHOST_SPEED * dt;
+      if (dist <= step || dist < 0.001) {
+        g.mesh.position.copy(tgtPos);
+        g.cell = { r: g.target.r, c: g.target.c };
+        ghostChooseTarget(g);
+      } else {
+        g.mesh.position.add(toTgt.multiplyScalar(step / dist));
+      }
+      // patrzenie w stronę gracza (oczy)
+      g.mesh.lookAt(playerPos.x, 0.55, playerPos.z);
+      // unoszenie
+      g.mesh.position.y = 0.55 + Math.sin(performance.now() * 0.004 + g.color) * 0.07;
+    }
+
+    // ----------------------------------------------------------
+    //  STAN GRY / HUD
+    // ----------------------------------------------------------
+    let running = false;
+    let score = 0;
+    let lives = START_LIVES;
+    let dotsLeft = totalDots;
+
+    const elScore = document.getElementById('score');
+    const elLives = document.getElementById('lives');
+    const elDots = document.getElementById('dots');
+    const elAmmo = document.getElementById('ammo');
+    const hud = document.getElementById('hud');
+    const overlay = document.getElementById('overlay');
+    const ovTitle = document.getElementById('ov-title');
+    const ovText = document.getElementById('ov-text');
+    const startBtn = document.getElementById('startBtn');
+
+    function updateAmmoHUD() {
+      if (bullet) { elAmmo.textContent = 'KULA: W LOCIE'; elAmmo.className = 'empty'; }
+      else { elAmmo.textContent = 'KULA: GOTOWA'; elAmmo.className = 'ready'; }
+    }
+    function updateHUD() {
+      elScore.textContent = score;
+      elLives.textContent = lives;
+      elDots.textContent = dotsLeft;
+    }
+
+    function resetPositions() {
+      playerPos.copy(playerStart);
+      facing.set(0, 0, -1);
+      removeBullet();
+      for (const g of ghosts) {
+        g.dead = false; g.mesh.visible = true;
+        g.cell = { r: g.spawn.r, c: g.spawn.c };
+        g.target = { r: g.spawn.r, c: g.spawn.c };
+        g.dirRC = { dr: 0, dc: 0 };
+        g.mesh.position.copy(cellToWorld(g.spawn.r, g.spawn.c)).setY(0.55);
+      }
+    }
+
+    function loseLife() {
+      lives--;
+      updateHUD();
+      if (lives <= 0) {
+        endGame(false);
+      } else {
+        resetPositions();
+      }
+    }
+
+    function startGame() {
+      // pełny reset
+      score = 0; lives = START_LIVES; dotsLeft = totalDots;
+      for (const d of dots) d.visible = true;
+      resetPositions();
+      updateHUD(); updateAmmoHUD();
+      overlay.classList.add('hidden');
+      hud.classList.remove('hidden');
+      running = true;
+      lastT = performance.now();
+    }
+
+    function endGame(win) {
+      running = false;
+      overlay.classList.remove('hidden');
+      ovTitle.textContent = win ? 'WYGRANA! 🎉' : 'KONIEC GRY';
+      ovText.textContent = win
+        ? `Zebrałeś wszystkie kropki! Wynik końcowy: ${score}.`
+        : `Duszki Cię dopadły. Wynik: ${score}.`;
+      startBtn.textContent = 'ZAGRAJ PONOWNIE';
+    }
+
+    startBtn.addEventListener('click', startGame);
+
+    // ----------------------------------------------------------
+    //  PĘTLA GŁÓWNA
+    // ----------------------------------------------------------
+    let lastT = performance.now();
+
+    function update(dt) {
+      // --- ruch gracza ---
+      let mx = 0, mz = 0;
+      if (keys['KeyW'] || keys['ArrowUp']) mz -= 1;
+      if (keys['KeyS'] || keys['ArrowDown']) mz += 1;
+      if (keys['KeyA'] || keys['ArrowLeft']) mx -= 1;
+      if (keys['KeyD'] || keys['ArrowRight']) mx += 1;
+
+      if (mx !== 0 || mz !== 0) {
+        const len = Math.hypot(mx, mz);
+        mx /= len; mz /= len;
+        facing.set(mx, 0, mz);
+        const dx = mx * PLAYER_SPEED * dt;
+        const dz = mz * PLAYER_SPEED * dt;
+        if (!collidesAt(playerPos.x + dx, playerPos.z)) playerPos.x += dx;
+        if (!collidesAt(playerPos.x, playerPos.z + dz)) playerPos.z += dz;
+      }
+      player.position.set(playerPos.x, 0.55, playerPos.z);
+      player.rotation.y = Math.atan2(facing.x, facing.z);
+      playerLight.position.set(playerPos.x, 2.4, playerPos.z);
+
+      // --- kamera podąża za graczem ---
+      const camTarget = new THREE.Vector3(playerPos.x, 0.55, playerPos.z);
+      const desired = camTarget.clone().add(CAM_OFFSET);
+      camera.position.lerp(desired, 1 - Math.pow(0.001, dt));
+      camera.lookAt(camTarget);
+
+      // --- kropki ---
+      for (const d of dots) {
+        if (!d.visible) continue;
+        d.rotation.y += dt * 2;
+        const dx = d.position.x - playerPos.x;
+        const dz = d.position.z - playerPos.z;
+        if (dx * dx + dz * dz < (PLAYER_R + 0.2) ** 2) {
+          d.visible = false;
+          score += 10; dotsLeft--;
+          updateHUD();
+          if (dotsLeft <= 0) { endGame(true); return; }
+        }
+      }
+
+      // --- kula ---
+      if (bullet) {
+        bullet.life -= dt;
+        const move = bullet.vel.clone().multiplyScalar(dt);
+        bullet.mesh.position.add(move);
+        const bp = bullet.mesh.position;
+        // kolizja ze ścianą
+        const bc = worldToCell(bp.x, bp.z);
+        if (isWall(bc.r, bc.c) || bullet.life <= 0) {
+          removeBullet();
+        } else {
+          // kolizja z duszkiem
+          for (const g of ghosts) {
+            if (g.dead) continue;
+            const dx = g.mesh.position.x - bp.x;
+            const dz = g.mesh.position.z - bp.z;
+            if (dx * dx + dz * dz < (PLAYER_R + 0.25) ** 2) {
+              g.dead = true; g.mesh.visible = false; g.respawnTimer = 4.0;
+              score += 100; updateHUD();
+              removeBullet();
+              break;
+            }
+          }
+        }
+      }
+
+      // --- duszki ---
+      for (const g of ghosts) {
+        updateGhost(g, dt);
+        if (g.dead) continue;
+        const dx = g.mesh.position.x - playerPos.x;
+        const dz = g.mesh.position.z - playerPos.z;
+        if (dx * dx + dz * dz < (PLAYER_R + PLAYER_R) ** 2) {
+          loseLife();
+          return;
+        }
+      }
+    }
+
+    function loop() {
+      requestAnimationFrame(loop);
+      const now = performance.now();
+      let dt = (now - lastT) / 1000;
+      lastT = now;
+      if (dt > 0.05) dt = 0.05; // limit przy zlagach
+      if (running) update(dt);
+      renderer.render(scene, camera);
+    }
+
+    // ----------------------------------------------------------
+    //  RESIZE + START
+    // ----------------------------------------------------------
+    function resize() {
+      const w = window.innerWidth, h = window.innerHeight;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // ustaw kamerę startową
+    camera.position.copy(playerStart.clone().add(CAM_OFFSET));
+    camera.lookAt(playerStart);
+
+    loop();
+  </script>
+</body>
+</html>
