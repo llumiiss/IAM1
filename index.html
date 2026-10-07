@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Pac-Man 3D — Labirynt</title>
   <style>
+    /* --- style UI: HUD, ekran startowy, klawisze --- */
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: "Segoe UI", Arial, sans-serif; }
     #game { display: block; width: 100%; height: 100%; }
@@ -17,8 +18,8 @@
       font-size: 18px; letter-spacing: 1px;
     }
     #hud .right { display: flex; gap: 26px; }
-    #ammo.ready { color: #6cf; text-shadow: 0 0 8px rgba(102,204,255,.7); }
-    #ammo.empty { color: #888; text-shadow: none; }
+    #teleport.ready { color: #6cf; text-shadow: 0 0 8px rgba(102,204,255,.7); }
+    #teleport.cooldown { color: #888; text-shadow: none; }
 
     #overlay {
       position: fixed; inset: 0; display: flex; flex-direction: column;
@@ -44,50 +45,57 @@
   </style>
 </head>
 <body>
+  <!-- canvas WebGL — tu Three.js rysuje scenę 3D -->
   <canvas id="game"></canvas>
 
+  <!-- pasek z wynikiem, życiami i statusem teleportu -->
   <div id="hud" class="hidden">
     <div class="left">WYNIK: <span id="score">0</span></div>
     <div class="right">
       <div>ŻYCIA: <span id="lives">3</span></div>
       <div>KROPKI: <span id="dots">0</span></div>
-      <div id="ammo" class="ready">KULA: GOTOWA</div>
+      <div id="teleport" class="ready">TELEPORT: SPACJA</div>
     </div>
   </div>
 
+  <!-- ekran startowy / koniec gry -->
   <div id="overlay">
     <h1>PAC-MAN 3D</h1>
     <h2 id="ov-title">Labirynt &amp; Duszki</h2>
     <p id="ov-text">Zbieraj wszystkie kropki w labiryncie i unikaj duszków.</p>
     <div class="keys">
       Ruch: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> lub strzałki &nbsp;|&nbsp;
-      Strzał kulą: <kbd>Spacja</kbd>
+      Teleport: <kbd>Spacja</kbd>
     </div>
-    <p style="color:#9aa;font-size:14px">Strzelasz jedną kulą naraz — trafiony duszek znika na chwilę i dostajesz punkty.</p>
+    <p style="color:#9aa;font-size:14px">Spacja przenosi Cię w losowe miejsce na mapie — odnowienie co 3 sekundy.</p>
     <button id="startBtn">START</button>
   </div>
 
   <!-- Three.js lokalnie — działa bez serwera i bez internetu -->
   <script src="three.min.js"></script>
   <script>
+    // sprawdzenie czy biblioteka się załadowała
     if (typeof THREE === 'undefined') {
       document.body.innerHTML = '<p style="color:#fff;padding:40px;font-family:sans-serif">Błąd: brak pliku three.min.js w tym samym folderze co index.html</p>';
       throw new Error('THREE not loaded');
     }
 
-    // ----------------------------------------------------------
-    //  USTAWIENIA / STAŁE
-    // ----------------------------------------------------------
-    const CELL = 2.4;            // rozmiar komórki labiryntu (jednostki świata)
+    // ==========================================================
+    //  USTAWIENIA / STAŁE — parametry gry i fizyki
+    // ==========================================================
+    const CELL = 2.4;            // rozmiar jednej komórki labiryntu (w jednostkach 3D)
     const WALL_H = 2.2;          // wysokość ścian
-    const PLAYER_R = 0.55;       // promień gracza
-    const PLAYER_SPEED = 6.0;    // prędkość gracza (jedn./s)
+    const PLAYER_R = 0.55;       // promień kolizji gracza (Pac-Mana)
+    const PLAYER_SPEED = 6.0;    // prędkość ruchu gracza
     const GHOST_SPEED = 3.4;     // prędkość duszków
-    const BULLET_SPEED = 18.0;   // prędkość kuli
-    const START_LIVES = 3;
+    const GHOST_COUNT = 5;       // ile duszków jest na mapie
+    const TELEPORT_COOLDOWN = 3; // czas odnowienia teleportu (sekundy)
+    const START_LIVES = 3;       // ile żyć na start
 
-    // Mapa labiryntu:  # = ściana, . = kropka (ścieżka), ' ' = puste pole,
-    // P = start gracza,  G = start duszka
+    // ==========================================================
+    //  MAPA LABIRYNTU — tekst ASCII, każdy znak = komórka
+    //  # = ściana, . = kropka, ' ' = puste pole, P = start, G = duszek
+    // ==========================================================
     const MAZE = [
       "###################",
       "#........#........#",
@@ -98,7 +106,7 @@
       "####.### # ###.####",
       "   #.#  G G  #.#   ",
       "####.# ##### #.####",
-      "#......#GGG#......#",
+      "#...... GGG ......#",
       "####.# ##### #.####",
       "   #.#       #.#   ",
       "####.# ##### #.####",
@@ -113,7 +121,10 @@
     const ROWS = MAZE.length;
     const COLS = MAZE[0].length;
 
-    // Zamiana wiersz/kolumna -> pozycja w świecie (środek komórki)
+    // ==========================================================
+    //  KONWERSJA WSPÓŁRZĘDNYCH — siatka mapy <-> świat 3D
+    // ==========================================================
+    // komórka (wiersz, kolumna) -> punkt w scenie Three.js
     function cellToWorld(r, c) {
       return new THREE.Vector3(
         (c - (COLS - 1) / 2) * CELL,
@@ -121,20 +132,30 @@
         (r - (ROWS - 1) / 2) * CELL
       );
     }
+    // pozycja w świecie -> najbliższa komórka na mapie
     function worldToCell(x, z) {
       return {
         c: Math.round(x / CELL + (COLS - 1) / 2),
         r: Math.round(z / CELL + (ROWS - 1) / 2),
       };
     }
+    // czy dana komórka jest ścianą (poza mapą też traktujemy jak ścianę)
     function isWall(r, c) {
       if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return true;
       return MAZE[r][c] === '#';
     }
 
-    // ----------------------------------------------------------
-    //  SCENA / RENDERER / KAMERA
-    // ----------------------------------------------------------
+    // lista wszystkich pól, na które można się teleportować (nie-ściany)
+    const walkableCells = [];
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (!isWall(r, c)) walkableCells.push({ r, c });
+      }
+    }
+
+    // ==========================================================
+    //  SCENA 3D — renderer, kamera, światła
+    // ==========================================================
     const canvas = document.getElementById('game');
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -143,26 +164,26 @@
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x05060f);
-    scene.fog = new THREE.Fog(0x05060f, 22, 48);
+    scene.fog = new THREE.Fog(0x05060f, 22, 48); // mgła — dalekie ściany znikają w tle
 
     const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 200);
-    const CAM_OFFSET = new THREE.Vector3(0, 16, 13); // ujęcie z góry-tyłu
+    const CAM_OFFSET = new THREE.Vector3(0, 16, 13); // kamera patrzy z góry-tyłu na gracza
 
-    // Światła
-    scene.add(new THREE.AmbientLight(0x6677aa, 0.7));
-    const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+    // oświetlenie sceny
+    scene.add(new THREE.AmbientLight(0x6677aa, 0.7)); // światło ogólne
+    const dir = new THREE.DirectionalLight(0xffffff, 1.0); // słońce + cienie
     dir.position.set(10, 25, 10);
     dir.castShadow = true;
     dir.shadow.mapSize.set(2048, 2048);
     dir.shadow.camera.left = -35; dir.shadow.camera.right = 35;
     dir.shadow.camera.top = 35; dir.shadow.camera.bottom = -35;
     scene.add(dir);
-    const playerLight = new THREE.PointLight(0xffe14d, 0.8, 12);
+    const playerLight = new THREE.PointLight(0xffe14d, 0.8, 12); // poświata przy graczu
     scene.add(playerLight);
 
-    // ----------------------------------------------------------
-    //  PODŁOGA
-    // ----------------------------------------------------------
+    // ==========================================================
+    //  PODŁOGA — duża płaszczyzna pod labiryntem
+    // ==========================================================
     const floorGeo = new THREE.PlaneGeometry(COLS * CELL + 6, ROWS * CELL + 6);
     const floorMat = new THREE.MeshStandardMaterial({ color: 0x0a0a22, roughness: 0.9, metalness: 0.1 });
     const floor = new THREE.Mesh(floorGeo, floorMat);
@@ -171,9 +192,9 @@
     floor.receiveShadow = true;
     scene.add(floor);
 
-    // ----------------------------------------------------------
-    //  ŚCIANY + KROPKI
-    // ----------------------------------------------------------
+    // ==========================================================
+    //  ŚCIANY — InstancedMesh = wiele identycznych brył, wydajniej
+    // ==========================================================
     const wallGeo = new THREE.BoxGeometry(CELL, WALL_H, CELL);
     const wallMat = new THREE.MeshStandardMaterial({
       color: 0x2240dd, roughness: 0.35, metalness: 0.45,
@@ -195,7 +216,9 @@
     wallMesh.count = wIdx;
     scene.add(wallMesh);
 
-    // Kropki
+    // ==========================================================
+    //  KROPKI — zbierane przez gracza, dają punkty
+    // ==========================================================
     const dots = [];
     const dotGeo = new THREE.SphereGeometry(0.16, 10, 10);
     const dotMat = new THREE.MeshStandardMaterial({
@@ -216,9 +239,9 @@
     }
     let totalDots = dots.length;
 
-    // ----------------------------------------------------------
-    //  GRACZ (Pac-Man)
-    // ----------------------------------------------------------
+    // ==========================================================
+    //  GRACZ (Pac-Man) — żółta kula, pozycja i kierunek patrzenia
+    // ==========================================================
     const playerGeo = new THREE.SphereGeometry(PLAYER_R, 24, 24);
     const playerMat = new THREE.MeshStandardMaterial({
       color: 0xffe14d, emissive: 0x886600, emissiveIntensity: 0.5,
@@ -228,24 +251,26 @@
     player.castShadow = true;
     scene.add(player);
 
+    // szukamy 'P' na mapie — to punkt startowy
     let playerStart = cellToWorld(0, 0);
     for (let r = 0; r < ROWS; r++)
       for (let c = 0; c < COLS; c++)
         if (MAZE[r][c] === 'P') playerStart = cellToWorld(r, c);
 
-    const playerPos = playerStart.clone();
+    const playerPos = playerStart.clone(); // logiczna pozycja (do kolizji i AI)
     const facing = new THREE.Vector3(0, 0, -1); // ostatni kierunek ruchu
 
-    // ----------------------------------------------------------
-    //  DUSZKI
-    // ----------------------------------------------------------
-    const GHOST_COLORS = [0xff4444, 0xff8cce, 0x46e0ff, 0xffa040];
+    // ==========================================================
+    //  DUSZKI — wrogowie, poruszają się po siatce i gonią gracza
+    // ==========================================================
+    const GHOST_COLORS = [0xff4444, 0xff8cce, 0x46e0ff, 0xffa040, 0x88ff66];
     const ghosts = [];
     const ghostSpawns = [];
     for (let r = 0; r < ROWS; r++)
       for (let c = 0; c < COLS; c++)
         if (MAZE[r][c] === 'G') ghostSpawns.push({ r, c });
 
+    // tworzy jednego duszka (model 3D + dane do AI)
     function makeGhost(color, spawn) {
       const g = new THREE.Group();
       const bodyMat = new THREE.MeshStandardMaterial({
@@ -256,7 +281,7 @@
       const skirt = new THREE.Mesh(new THREE.CylinderGeometry(PLAYER_R, PLAYER_R, 0.55, 20), bodyMat);
       skirt.position.y = -0.27; skirt.castShadow = true;
       g.add(body); g.add(skirt);
-      // oczy
+      // oczy duszka
       const eyeMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
       const pupMat = new THREE.MeshStandardMaterial({ color: 0x1133aa });
       for (const sx of [-0.22, 0.22]) {
@@ -270,59 +295,68 @@
       scene.add(g);
       return {
         mesh: g, color, spawn,
-        cell: { r: spawn.r, c: spawn.c },
-        target: { r: spawn.r, c: spawn.c },
-        dirRC: { dr: 0, dc: 0 },
+        cell: { r: spawn.r, c: spawn.c },       // aktualna komórka na siatce
+        target: { r: spawn.r, c: spawn.c },     // docelowa komórka ruchu
+        dirRC: { dr: 0, dc: 0 },              // kierunek na siatce (wiersz/kolumna)
         respawnTimer: 0,
         dead: false,
       };
     }
-    for (let i = 0; i < ghostSpawns.length; i++) {
-      ghosts.push(makeGhost(GHOST_COLORS[i % GHOST_COLORS.length], ghostSpawns[i]));
+    for (let i = 0; i < GHOST_COUNT; i++) {
+      ghosts.push(makeGhost(GHOST_COLORS[i], ghostSpawns[i % ghostSpawns.length]));
     }
 
-    // ----------------------------------------------------------
-    //  KULA (pocisk) — tylko jedna naraz
-    // ----------------------------------------------------------
-    let bullet = null;
-    const bulletGeo = new THREE.SphereGeometry(0.22, 16, 16);
-    const bulletMat = new THREE.MeshStandardMaterial({
-      color: 0x66ccff, emissive: 0x33aaff, emissiveIntensity: 1.4,
-    });
+    // ==========================================================
+    //  TELEPORT — Spacja przenosi gracza w losowe wolne pole
+    // ==========================================================
+    let teleportCooldown = 0; // ile sekund do następnego teleportu
 
-    function shoot() {
-      if (bullet || !running) return;
-      const mesh = new THREE.Mesh(bulletGeo, bulletMat);
-      mesh.position.copy(playerPos).setY(0.55);
-      const light = new THREE.PointLight(0x66ccff, 1.2, 6);
-      mesh.add(light);
-      scene.add(mesh);
-      bullet = { mesh, vel: facing.clone().normalize().multiplyScalar(BULLET_SPEED), life: 2.2 };
-      updateAmmoHUD();
-    }
-    function removeBullet() {
-      if (!bullet) return;
-      scene.remove(bullet.mesh);
-      bullet = null;
-      updateAmmoHUD();
+    function teleport() {
+      if (!running || walkableCells.length === 0 || teleportCooldown > 0) return;
+
+      const current = worldToCell(playerPos.x, playerPos.z);
+      let chosen = walkableCells[0];
+
+      // losujemy komórkę, starając się nie trafić w to samo miejsce
+      for (let i = 0; i < 25; i++) {
+        chosen = walkableCells[Math.floor(Math.random() * walkableCells.length)];
+        if (chosen.r !== current.r || chosen.c !== current.c) break;
+      }
+
+      const dest = cellToWorld(chosen.r, chosen.c);
+      playerPos.set(dest.x, 0, dest.z);
+      player.position.set(playerPos.x, 0.55, playerPos.z);
+      playerLight.position.set(playerPos.x, 2.4, playerPos.z);
+
+      teleportCooldown = TELEPORT_COOLDOWN; // blokada na 3 sekundy
+      updateTeleportHUD();
     }
 
-    // ----------------------------------------------------------
-    //  STEROWANIE
-    // ----------------------------------------------------------
+    function updateTeleportHUD() {
+      if (teleportCooldown > 0) {
+        elTeleport.textContent = `TELEPORT: ${Math.ceil(teleportCooldown)}s`;
+        elTeleport.className = 'cooldown';
+      } else {
+        elTeleport.textContent = 'TELEPORT: SPACJA';
+        elTeleport.className = 'ready';
+      }
+    }
+
+    // ==========================================================
+    //  STEROWANIE — nasłuch klawiatury (WASD, strzałki, Spacja)
+    // ==========================================================
     const keys = {};
     window.addEventListener('keydown', (e) => {
       keys[e.code] = true;
-      if (e.code === 'Space') { e.preventDefault(); shoot(); }
+      if (e.code === 'Space') { e.preventDefault(); teleport(); }
       if ([ 'ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space' ].includes(e.code)) e.preventDefault();
     });
     window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
-    // ----------------------------------------------------------
-    //  KOLIZJE GRACZ <-> ŚCIANY  (przesuwanie po osiach + ślizganie)
-    // ----------------------------------------------------------
+    // ==========================================================
+    //  KOLIZJE GRACZ <-> ŚCIANY — sprawdzanie przed ruchem
+    // ==========================================================
     function collidesAt(x, z) {
-      // sprawdza komórki w pobliżu pozycji (x,z)
       const minC = Math.floor((x - PLAYER_R) / CELL + (COLS - 1) / 2);
       const maxC = Math.ceil((x + PLAYER_R) / CELL + (COLS - 1) / 2);
       const minR = Math.floor((z - PLAYER_R) / CELL + (ROWS - 1) / 2);
@@ -341,9 +375,9 @@
       return false;
     }
 
-    // ----------------------------------------------------------
-    //  RUCH DUSZKÓW  (po siatce, w stronę gracza)
-    // ----------------------------------------------------------
+    // ==========================================================
+    //  AI DUSZKÓW — wybór następnej komórki i ruch po siatce
+    // ==========================================================
     function ghostChooseTarget(g) {
       const { r, c } = g.cell;
       const options = [];
@@ -354,21 +388,18 @@
       for (const d of dirs) {
         const nr = r + d.dr, nc = c + d.dc;
         if (isWall(nr, nc)) continue;
-        // nie zawracaj, chyba że ślepy zaułek
-        if (d.dr === -g.dirRC.dr && d.dc === -g.dirRC.dc) continue;
+        if (d.dr === -g.dirRC.dr && d.dc === -g.dirRC.dc) continue; // nie zawracaj od razu
         options.push({ d, nr, nc });
       }
       let pool = options;
       if (pool.length === 0) {
-        // ślepy zaułek -> zawróć
         const nr = r - g.dirRC.dr, nc = c - g.dirRC.dc;
         if (!isWall(nr, nc)) pool = [{ d: { dr: -g.dirRC.dr, dc: -g.dirRC.dc }, nr, nc }];
         else return;
       }
-      // cel: komórka gracza
       const pc = worldToCell(playerPos.x, playerPos.z);
-      // 70% goni gracza, 30% losowo (żeby się nie blokowały)
       let chosen;
+      // 70% idą w stronę gracza, 30% losowo — żeby nie utknęły w korku
       if (Math.random() < 0.7) {
         chosen = pool.reduce((best, o) => {
           const dist = (o.nr - pc.r) ** 2 + (o.nc - pc.c) ** 2;
@@ -405,15 +436,13 @@
       } else {
         g.mesh.position.add(toTgt.multiplyScalar(step / dist));
       }
-      // patrzenie w stronę gracza (oczy)
       g.mesh.lookAt(playerPos.x, 0.55, playerPos.z);
-      // unoszenie
       g.mesh.position.y = 0.55 + Math.sin(performance.now() * 0.004 + g.color) * 0.07;
     }
 
-    // ----------------------------------------------------------
-    //  STAN GRY / HUD
-    // ----------------------------------------------------------
+    // ==========================================================
+    //  STAN GRY / HUD — wynik, życia, ekrany start i koniec
+    // ==========================================================
     let running = false;
     let score = 0;
     let lives = START_LIVES;
@@ -422,27 +451,25 @@
     const elScore = document.getElementById('score');
     const elLives = document.getElementById('lives');
     const elDots = document.getElementById('dots');
-    const elAmmo = document.getElementById('ammo');
+    const elTeleport = document.getElementById('teleport');
     const hud = document.getElementById('hud');
     const overlay = document.getElementById('overlay');
     const ovTitle = document.getElementById('ov-title');
     const ovText = document.getElementById('ov-text');
     const startBtn = document.getElementById('startBtn');
 
-    function updateAmmoHUD() {
-      if (bullet) { elAmmo.textContent = 'KULA: W LOCIE'; elAmmo.className = 'empty'; }
-      else { elAmmo.textContent = 'KULA: GOTOWA'; elAmmo.className = 'ready'; }
-    }
     function updateHUD() {
       elScore.textContent = score;
       elLives.textContent = lives;
       elDots.textContent = dotsLeft;
     }
 
+    // wraca gracz i duszki na pozycje startowe (po utracie życia)
     function resetPositions() {
       playerPos.copy(playerStart);
       facing.set(0, 0, -1);
-      removeBullet();
+      teleportCooldown = 0;
+      updateTeleportHUD();
       for (const g of ghosts) {
         g.dead = false; g.mesh.visible = true;
         g.cell = { r: g.spawn.r, c: g.spawn.c };
@@ -463,11 +490,10 @@
     }
 
     function startGame() {
-      // pełny reset
       score = 0; lives = START_LIVES; dotsLeft = totalDots;
       for (const d of dots) d.visible = true;
       resetPositions();
-      updateHUD(); updateAmmoHUD();
+      updateHUD(); updateTeleportHUD();
       overlay.classList.add('hidden');
       hud.classList.remove('hidden');
       running = true;
@@ -486,13 +512,13 @@
 
     startBtn.addEventListener('click', startGame);
 
-    // ----------------------------------------------------------
-    //  PĘTLA GŁÓWNA
-    // ----------------------------------------------------------
+    // ==========================================================
+    //  PĘTLA GŁÓWNA — update logiki + render klatki
+    // ==========================================================
     let lastT = performance.now();
 
     function update(dt) {
-      // --- ruch gracza ---
+      // --- ruch gracza (WASD / strzałki) ---
       let mx = 0, mz = 0;
       if (keys['KeyW'] || keys['ArrowUp']) mz -= 1;
       if (keys['KeyS'] || keys['ArrowDown']) mz += 1;
@@ -512,13 +538,13 @@
       player.rotation.y = Math.atan2(facing.x, facing.z);
       playerLight.position.set(playerPos.x, 2.4, playerPos.z);
 
-      // --- kamera podąża za graczem ---
+      // --- kamera płynnie podąża za graczem ---
       const camTarget = new THREE.Vector3(playerPos.x, 0.55, playerPos.z);
       const desired = camTarget.clone().add(CAM_OFFSET);
       camera.position.lerp(desired, 1 - Math.pow(0.001, dt));
       camera.lookAt(camTarget);
 
-      // --- kropki ---
+      // --- zbieranie kropek ---
       for (const d of dots) {
         if (!d.visible) continue;
         d.rotation.y += dt * 2;
@@ -532,33 +558,14 @@
         }
       }
 
-      // --- kula ---
-      if (bullet) {
-        bullet.life -= dt;
-        const move = bullet.vel.clone().multiplyScalar(dt);
-        bullet.mesh.position.add(move);
-        const bp = bullet.mesh.position;
-        // kolizja ze ścianą
-        const bc = worldToCell(bp.x, bp.z);
-        if (isWall(bc.r, bc.c) || bullet.life <= 0) {
-          removeBullet();
-        } else {
-          // kolizja z duszkiem
-          for (const g of ghosts) {
-            if (g.dead) continue;
-            const dx = g.mesh.position.x - bp.x;
-            const dz = g.mesh.position.z - bp.z;
-            if (dx * dx + dz * dz < (PLAYER_R + 0.25) ** 2) {
-              g.dead = true; g.mesh.visible = false; g.respawnTimer = 4.0;
-              score += 100; updateHUD();
-              removeBullet();
-              break;
-            }
-          }
-        }
+      // --- odliczanie cooldownu teleportu w HUD ---
+      if (teleportCooldown > 0) {
+        teleportCooldown -= dt;
+        if (teleportCooldown < 0) teleportCooldown = 0;
+        updateTeleportHUD();
       }
 
-      // --- duszki ---
+      // --- duszki: ruch + kolizja z graczem ---
       for (const g of ghosts) {
         updateGhost(g, dt);
         if (g.dead) continue;
@@ -571,19 +578,20 @@
       }
     }
 
+    // requestAnimationFrame — ~60 FPS, liczy dt i rysuje scenę
     function loop() {
       requestAnimationFrame(loop);
       const now = performance.now();
       let dt = (now - lastT) / 1000;
       lastT = now;
-      if (dt > 0.05) dt = 0.05; // limit przy zlagach
+      if (dt > 0.05) dt = 0.05;
       if (running) update(dt);
       renderer.render(scene, camera);
     }
 
-    // ----------------------------------------------------------
-    //  RESIZE + START
-    // ----------------------------------------------------------
+    // ==========================================================
+    //  RESIZE OKNA + start pętli renderowania
+    // ==========================================================
     function resize() {
       const w = window.innerWidth, h = window.innerHeight;
       renderer.setSize(w, h, false);
@@ -593,7 +601,6 @@
     window.addEventListener('resize', resize);
     resize();
 
-    // ustaw kamerę startową
     camera.position.copy(playerStart.clone().add(CAM_OFFSET));
     camera.lookAt(playerStart);
 
