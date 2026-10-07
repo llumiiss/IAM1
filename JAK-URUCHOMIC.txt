@@ -8,4 +8,4 @@ Recznie (Python):
   python -m http.server 8765
   http://localhost:8765/index.html
 
-Wiecej informacji: README.md
+Wiecej informacji: README.md, docs/instrukcja-uzytkownika.pdf

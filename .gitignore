@@ -13,3 +13,7 @@ Desktop.ini
 # Logi i pliki tymczasowe
 *.log
 *.tmp
+
+# Paczki oddane na zaliczenie (kopie robocze, nie część kodu)
+*.zip
+pacman-3d Litosh/
